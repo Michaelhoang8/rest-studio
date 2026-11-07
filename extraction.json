@@ -1,0 +1,33 @@
+{
+  "app": "rest-studio",
+  "mode": "rest",
+  "source": "Michaelhoang8/portfolio-lab",
+  "backend_definitions": {
+    "openapi": [
+      "build_spec"
+    ],
+    "rest_api": [
+      "Problem",
+      "etag",
+      "handle",
+      "if_none_matches",
+      "single_header",
+      "validate"
+    ],
+    "json_input": [
+      "decode",
+      "read_exact"
+    ],
+    "db": [
+      "SCHEMA",
+      "connect",
+      "initialize",
+      "rows"
+    ],
+    "validation": [
+      "ConflictError",
+      "NotFoundError",
+      "ValidationError"
+    ]
+  }
+}

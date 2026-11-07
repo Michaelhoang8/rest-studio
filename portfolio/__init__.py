@@ -1,0 +1,1 @@
+"""REST Studio: standalone application."""
