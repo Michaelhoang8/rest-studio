@@ -25,6 +25,12 @@ Paste the key into the request builder. `/openapi.json` documents the contract.
 
 SQLite state lives in `data/rest-studio.db` and is ignored by Git. `--database /path/to/app.db` selects another database. Uploaded analysis input is processed in memory. No other repository or shared service is required.
 
+## Interface
+
+The request bar selects an endpoint and sends the request. Authentication, filters, and conditional headers sit beside the JSON editor. Responses show their status, body, and headers together. Session history and collection import/export open in a separate dialog; preparing a historical request closes the dialog without sending it. On narrow screens, request settings and response headers stack beneath their related controls.
+
+The interface uses its own stylesheet and does not load the original shared identity or animation scripts.
+
 ## API example
 
 `examples/request.json` contains a fictional request body and its endpoint. Browser analysis requests use `Content-Type: application/json` and `X-Portfolio-Client: browser`; Notes requests use `X-API-Key`. All routes are local to this app.

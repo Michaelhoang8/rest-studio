@@ -1,102 +1,396 @@
-'use strict';
-const $=s=>document.querySelector(s);
-const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let pageResult=null,activeRequest=null;
-$('#cancel-request').addEventListener('click',()=>activeRequest?.abort());
-window.addEventListener('pagehide',()=>activeRequest?.abort());
-const methods={list:'GET',create:'POST',get:'GET',head:'HEAD',replace:'PUT',update:'PATCH',delete:'DELETE'};
-function view(){const op=$('#operation').value;$('#filters').hidden=op!=='list';$('#id-label').hidden=['list','create'].includes(op);$('#read-etag-label').hidden=!['get','head'].includes(op);$('#etag-label').hidden=!['replace','update','delete'].includes(op);$('#idem-label').hidden=op!=='create';$('#body-label').hidden=!['create','replace','update'].includes(op);}
-function notice(text,error=false){$('#notice').textContent=text;$('#notice').className=error?'error':'';}
-$('#operation').addEventListener('change',view);
-$('#sample').addEventListener('click',()=>{$('#operation').value='create';$('#body').value=JSON.stringify({title:'API design review',content:'Verify pagination, optimistic concurrency, and idempotent retries.',status:'draft'},null,2);$('#idem').value=crypto.randomUUID();view();notice('Sample ready. Send it to create a real note.');});
-$('#run').addEventListener('click',async()=>{
- if(activeRequest)return;
- const op=$('#operation').value,method=methods[op];let path='/api/v1/notes';const headers={'X-API-Key':$('#key').value};
- if(!headers['X-API-Key']){notice('Enter the key configured on your server.',true);return;}
- if(!['list','create'].includes(op)){const id=$('#note-id').value.trim();if(!/^[0-9a-f-]{36}$/.test(id)){notice('Enter a note UUID.',true);return;}path+='/'+id;}
- if(op==='list'){const invalid=[...$('#filters').querySelectorAll('input')].find(input=>!input.checkValidity());if(invalid){$('#filters').open=true;invalid.reportValidity();return;}const params=new URLSearchParams({page:$('#page').value,page_size:$('#page-size').value});if($('#status-filter').value)params.set('status',$('#status-filter').value);if($('#query').value)params.set('q',$('#query').value);path+='?'+params;}
- if(['get','head'].includes(op)&&$('#read-etag').value)headers['If-None-Match']=$('#read-etag').value;
- if(['replace','update','delete'].includes(op))headers['If-Match']=$('#etag').value;
- if(op==='create'&&$('#idem').value)headers['Idempotency-Key']=$('#idem').value;
- const options={method,headers};if(['create','replace','update'].includes(op)){headers['Content-Type']='application/json';options.body=$('#body').value;}
- const snapshot=Object.fromEntries(historyFields.map(id=>[id,$('#'+id).value]));
- const controls=[...document.querySelectorAll('input,select,textarea,button')];const disabled=controls.map(c=>c.disabled);controls.forEach(c=>c.disabled=true);$('#copy-response').textContent='Copy body';document.querySelector('.results').setAttribute('aria-busy','true');$('#request-caption').textContent=`${method} ${path} · Sending…`;const start=performance.now();notice('Sending request…');
- const controller=new AbortController();activeRequest=controller;$('#cancel-request').hidden=false;$('#cancel-request').disabled=false;
- try{const {response,text}=await window.restTransport.send(path,options,{signal:controller.signal});let data;try{data=text?JSON.parse(text):null;}catch{data=text;}
- $('#summary').innerHTML=[['HTTP status',response.status],['Method',method],['Elapsed',`${Math.round(performance.now()-start)} ms`]].map(([k,v])=>`<div class="stat"><small>${esc(k)}</small><strong>${esc(v)}</strong></div>`).join('');
- $('#headers').textContent=['content-type','content-length','location','etag','idempotency-replayed','x-request-id','allow'].filter(h=>response.headers.has(h)).map(h=>`${h}: ${response.headers.get(h)}`).join('\n');
- recordHistory({method,path,status:response.status,elapsed_ms:Math.round(performance.now()-start),body:options.body||null,headers:Object.fromEntries(Object.entries(headers).filter(([key])=>key!=='X-API-Key')),form:snapshot});
- $('#request-caption').textContent=`${method} ${path} · ${response.status} · ${new Date().toLocaleTimeString()}`;
- $('#response').textContent=response.status===304?'(not modified; no response body)':data===null?'(empty body)':typeof data==='string'?data:JSON.stringify(data,null,2);
- $('#notes').innerHTML=Array.isArray(data?.items)?data.items.map(n=>`<div class="note"><div><strong>${esc(n.title)}</strong><small>${esc(n.status)} · v${n.version}</small></div><button data-id="${esc(n.id)}">Select note</button></div>`).join(''):'';
- pageResult=response.ok&&op==='list'&&Array.isArray(data?.items)?{data,form:snapshot}:null;renderPagination();
- if(response.ok&&data?.id){$('#note-id').value=data.id;if(response.headers.has('etag'))$('#etag').value=response.headers.get('etag');}
- if(['get','head'].includes(op)&&response.headers.has('etag'))$('#etag').value=response.headers.get('etag');
- notice(response.status===304?'Not modified. The note still matches the supplied version; no response body was transferred.':response.ok?'Request succeeded. Inspect the status, headers, and body below.':data?.detail||'Request failed.',!response.ok&&response.status!==304);
- }catch(error){notice(window.restTransport.recoveryMessage(error,method,!!headers['Idempotency-Key']),true);$('#request-caption').textContent=`${method} ${path} · No complete response; any response below is from the previous request.`;}finally{activeRequest=null;$('#cancel-request').hidden=true;controls.forEach((c,i)=>c.disabled=disabled[i]);$('#copy-response').disabled=$('#response').textContent==='No request sent.';document.querySelector('.results').setAttribute('aria-busy','false');renderPagination();$('#export-requests').disabled=!requestHistory.length;}
-});
-$('#notes').addEventListener('click',event=>{const id=event.target.dataset.id;if(!id)return;$('#note-id').value=id;$('#etag').value='';$('#read-etag').value='';$('#operation').value='get';view();notice('Note selected. Send GET to retrieve its current ETag.');});
-$('#body').value=JSON.stringify({title:'Example note',content:'Created through the versioned REST API.',status:'draft'},null,2);view();
-
-$('#copy-response').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('#response').textContent);$('#copy-response').textContent='Copied';}catch{notice('Clipboard unavailable. Select and copy the response body manually.',true);}});
-
-const historyFields=['operation','note-id','page','page-size','status-filter','query','etag','read-etag','idem','body'];
-const requestHistory=[];
-const historyPanel=document.createElement('section');historyPanel.className='extension-report';
-historyPanel.innerHTML='<h3>Request history · this session</h3><p class="hint">Last 10 completed responses. Preparing a request does not send it. API keys are excluded; request bodies may contain note content. History clears when you leave the page.</p><div id="request-history"></div><button id="export-requests" disabled>Export request collection</button>';
-document.querySelector('.results').append(historyPanel);
-function recordHistory(entry){
- requestHistory.unshift(entry);requestHistory.splice(10);
- $('#request-history').innerHTML=requestHistory.map((r,i)=>`<div class="note"><div><strong>${esc(r.method)} · ${r.status}</strong><small>${esc(r.path)} · ${r.elapsed_ms} ms</small></div><button data-prepare="${i}" type="button">Prepare</button></div>`).join('');
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (v) =>
+  String(v).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+let pageResult = null,
+  activeRequest = null;
+$("#cancel-request").addEventListener("click", () => activeRequest?.abort());
+window.addEventListener("pagehide", () => activeRequest?.abort());
+const methods = {
+  list: "GET",
+  create: "POST",
+  get: "GET",
+  head: "HEAD",
+  replace: "PUT",
+  update: "PATCH",
+  delete: "DELETE",
+};
+function view() {
+  const op = $("#operation").value;
+  $("#delete-warning").hidden = op !== "delete";
+  $("#run").textContent = op === "delete" ? "Delete note" : "Send request";
+  $("#filters").hidden = op !== "list";
+  $("#id-label").hidden = ["list", "create"].includes(op);
+  $("#read-etag-label").hidden = !["get", "head"].includes(op);
+  $("#etag-label").hidden = !["replace", "update", "delete"].includes(op);
+  $("#idem-label").hidden = op !== "create";
+  $("#body-label").hidden = !["create", "replace", "update"].includes(op);
+  $("#body-empty").hidden = !$("#body-label").hidden;
 }
-$('#request-history').addEventListener('click',event=>{
- if(event.target.dataset.prepare===undefined||$('#run').disabled)return;
- const entry=requestHistory[Number(event.target.dataset.prepare)];
- for(const id of historyFields)$('#'+id).value=entry.form[id];
- view();notice('Historical request prepared. Review its body, version, and idempotency key before sending.');$('#operation').focus();
-});
-$('#export-requests').addEventListener('click',()=>{
- const collection={format:'portfolio-lab-request-collection-v1',authentication:'Supply X-API-Key separately',requests:requestHistory.map(({form,...entry})=>entry)};
- const url=URL.createObjectURL(new Blob([JSON.stringify(collection,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='request-collection.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-});
-
-const pagination=document.createElement('div');pagination.className='response-pagination';pagination.hidden=true;
-pagination.setAttribute('role','group');pagination.setAttribute('aria-label','Note result pages');
-pagination.innerHTML='<button type="button" data-page-step="-1">← Previous</button><span role="status" aria-live="polite"></span><button type="button" data-page-step="1">Next →</button>';
-$('#notes').after(pagination);
-function renderPagination(){
- pagination.hidden=!pageResult;if(!pageResult)return;
- const {page,page_size,total,next}=pageResult.data,busy=$('#run').disabled;
- pagination.querySelector('span').textContent=`Page ${page} · ${total} ${total===1?'note':'notes'} · ${page_size} per page`;
- pagination.querySelector('[data-page-step="-1"]').disabled=busy||page<=1;
- pagination.querySelector('[data-page-step="1"]').disabled=busy||!next;
+function notice(text, error = false) {
+  $("#notice").textContent = text;
+  $("#notice").className = error ? "error" : "";
 }
-pagination.addEventListener('click',event=>{
- const button=event.target.closest('[data-page-step]');if(!button||button.disabled||!pageResult)return;
- const page=pageResult.data.page+Number(button.dataset.pageStep);
- for(const id of ['page-size','status-filter','query'])$('#'+id).value=pageResult.form[id];
- $('#page').value=page;$('#operation').value='list';view();$('#run').click();
+$("#operation").addEventListener("change", view);
+$("#sample").addEventListener("click", () => {
+  $("#operation").value = "create";
+  $("#body").value = JSON.stringify(
+    {
+      title: "API design review",
+      content:
+        "Verify pagination, optimistic concurrency, and idempotent retries.",
+      status: "draft",
+    },
+    null,
+    2,
+  );
+  $("#idem").value = crypto.randomUUID();
+  view();
+  notice("Sample ready. Send it to create a real note.");
+});
+$("#run").addEventListener("click", async () => {
+  if (activeRequest) return;
+  const op = $("#operation").value,
+    method = methods[op];
+  let path = "/api/v1/notes";
+  const headers = { "X-API-Key": $("#key").value };
+  if (!headers["X-API-Key"]) {
+    notice("Enter the key configured on your server.", true);
+    return;
+  }
+  if (!["list", "create"].includes(op)) {
+    const id = $("#note-id").value.trim();
+    if (!/^[0-9a-f-]{36}$/.test(id)) {
+      notice("Enter a note UUID.", true);
+      return;
+    }
+    path += "/" + id;
+  }
+  if (op === "list") {
+    const invalid = [...$("#filters").querySelectorAll("input")].find(
+      (input) => !input.checkValidity(),
+    );
+    if (invalid) {
+      $("#filters").open = true;
+      invalid.reportValidity();
+      return;
+    }
+    const params = new URLSearchParams({
+      page: $("#page").value,
+      page_size: $("#page-size").value,
+    });
+    if ($("#status-filter").value)
+      params.set("status", $("#status-filter").value);
+    if ($("#query").value) params.set("q", $("#query").value);
+    path += "?" + params;
+  }
+  if (["get", "head"].includes(op) && $("#read-etag").value)
+    headers["If-None-Match"] = $("#read-etag").value;
+  if (["replace", "update", "delete"].includes(op))
+    headers["If-Match"] = $("#etag").value;
+  if (op === "create" && $("#idem").value)
+    headers["Idempotency-Key"] = $("#idem").value;
+  const options = { method, headers };
+  if (["create", "replace", "update"].includes(op)) {
+    headers["Content-Type"] = "application/json";
+    options.body = $("#body").value;
+  }
+  const snapshot = Object.fromEntries(
+    historyFields.map((id) => [id, $("#" + id).value]),
+  );
+  const controls = [
+    ...document.querySelectorAll("input,select,textarea,button"),
+  ];
+  const disabled = controls.map((c) => c.disabled);
+  controls.forEach((c) => (c.disabled = true));
+  $("#copy-response").textContent = "Copy body";
+  document.querySelector(".results").setAttribute("aria-busy", "true");
+  $("#request-caption").textContent = `${method} ${path} · Sending…`;
+  const start = performance.now();
+  notice("Sending request…");
+  const controller = new AbortController();
+  activeRequest = controller;
+  $("#cancel-request").hidden = false;
+  $("#cancel-request").disabled = false;
+  try {
+    const { response, text } = await window.restTransport.send(path, options, {
+      signal: controller.signal,
+    });
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    $("#summary").innerHTML = [
+      ["HTTP status", response.status],
+      ["Method", method],
+      ["Elapsed", `${Math.round(performance.now() - start)} ms`],
+    ]
+      .map(
+        ([k, v]) =>
+          `<div class="stat"><small>${esc(k)}</small><strong>${esc(v)}</strong></div>`,
+      )
+      .join("");
+    $("#headers").textContent = [
+      "content-type",
+      "content-length",
+      "location",
+      "etag",
+      "idempotency-replayed",
+      "x-request-id",
+      "allow",
+    ]
+      .filter((h) => response.headers.has(h))
+      .map((h) => `${h}: ${response.headers.get(h)}`)
+      .join("\n");
+    recordHistory({
+      method,
+      path,
+      status: response.status,
+      elapsed_ms: Math.round(performance.now() - start),
+      body: options.body || null,
+      headers: Object.fromEntries(
+        Object.entries(headers).filter(([key]) => key !== "X-API-Key"),
+      ),
+      form: snapshot,
+    });
+    $("#request-caption").textContent =
+      `${method} ${path} · ${response.status} · ${new Date().toLocaleTimeString()}`;
+    $("#response").textContent =
+      response.status === 304
+        ? "(not modified; no response body)"
+        : data === null
+          ? "(empty body)"
+          : typeof data === "string"
+            ? data
+            : JSON.stringify(data, null, 2);
+    $("#notes").innerHTML = Array.isArray(data?.items)
+      ? data.items
+          .map(
+            (n) =>
+              `<div class="note"><div><strong>${esc(n.title)}</strong><small>${esc(n.status)} · v${n.version}</small></div><button data-id="${esc(n.id)}">Select note</button></div>`,
+          )
+          .join("")
+      : "";
+    pageResult =
+      response.ok && op === "list" && Array.isArray(data?.items)
+        ? { data, form: snapshot }
+        : null;
+    renderPagination();
+    if (response.ok && data?.id) {
+      $("#note-id").value = data.id;
+      if (response.headers.has("etag"))
+        $("#etag").value = response.headers.get("etag");
+    }
+    if (["get", "head"].includes(op) && response.headers.has("etag"))
+      $("#etag").value = response.headers.get("etag");
+    notice(
+      response.status === 304
+        ? "Not modified. The note still matches the supplied version; no response body was transferred."
+        : response.ok
+          ? "Request succeeded."
+          : data?.detail || "Request failed.",
+      !response.ok && response.status !== 304,
+    );
+  } catch (error) {
+    notice(
+      window.restTransport.recoveryMessage(
+        error,
+        method,
+        !!headers["Idempotency-Key"],
+      ),
+      true,
+    );
+    $("#request-caption").textContent =
+      `${method} ${path} · No complete response; any response below is from the previous request.`;
+  } finally {
+    activeRequest = null;
+    $("#cancel-request").hidden = true;
+    controls.forEach((c, i) => (c.disabled = disabled[i]));
+    $("#copy-response").disabled =
+      $("#response").textContent === "No request sent.";
+    document.querySelector(".results").setAttribute("aria-busy", "false");
+    renderPagination();
+    $("#export-requests").disabled = !requestHistory.length;
+  }
+});
+$("#notes").addEventListener("click", (event) => {
+  const id = event.target.dataset.id;
+  if (!id) return;
+  $("#note-id").value = id;
+  $("#etag").value = "";
+  $("#read-etag").value = "";
+  $("#operation").value = "get";
+  view();
+  notice("Note selected. Send GET to retrieve its current ETag.");
+});
+$("#body").value = JSON.stringify(
+  {
+    title: "Example note",
+    content: "Created through the versioned REST API.",
+    status: "draft",
+  },
+  null,
+  2,
+);
+view();
+
+$("#copy-response").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#response").textContent);
+    $("#copy-response").textContent = "Copied";
+  } catch {
+    notice(
+      "Clipboard unavailable. Select and copy the response body manually.",
+      true,
+    );
+  }
 });
 
-const importPanel=document.createElement('details');importPanel.className='secondary-options';
-importPanel.innerHTML='<summary>Import a request collection</summary><p class="hint">Choose an exported Portfolio Lab collection (UTF-8 JSON, up to 1 MB and 10 requests). Import only prepares requests; review before sending. Authentication stays separate.</p><label>Collection file<input id="import-collection" type="file" accept=".json,application/json"></label><p id="import-feedback" role="status"></p><div id="imported-requests"></div>';
+const historyFields = [
+  "operation",
+  "note-id",
+  "page",
+  "page-size",
+  "status-filter",
+  "query",
+  "etag",
+  "read-etag",
+  "idem",
+  "body",
+];
+const requestHistory = [];
+const historyPanel = document.createElement("section");
+historyPanel.className = "extension-report";
+historyPanel.innerHTML =
+  '<h3>This session</h3><p class="hint">Last 10 completed responses. Preparing a request does not send it. API keys are excluded; request bodies may contain note content. History clears when you leave the page.</p><div id="request-history"></div><button id="export-requests" disabled>Export request collection</button>';
+$("#history-mount").append(historyPanel);
+function recordHistory(entry) {
+  requestHistory.unshift(entry);
+  requestHistory.splice(10);
+  $("#request-history").innerHTML = requestHistory
+    .map(
+      (r, i) =>
+        `<div class="note"><div><strong>${esc(r.method)} · ${r.status}</strong><small>${esc(r.path)} · ${r.elapsed_ms} ms</small></div><button data-prepare="${i}" type="button">Prepare</button></div>`,
+    )
+    .join("");
+}
+$("#request-history").addEventListener("click", (event) => {
+  if (event.target.dataset.prepare === undefined || $("#run").disabled) return;
+  const entry = requestHistory[Number(event.target.dataset.prepare)];
+  for (const id of historyFields) $("#" + id).value = entry.form[id];
+  $("#history-dialog").close();
+  view();
+  notice(
+    "Historical request prepared. Review its body, version, and idempotency key before sending.",
+  );
+  $("#operation").focus();
+});
+$("#export-requests").addEventListener("click", () => {
+  const collection = {
+    format: "portfolio-lab-request-collection-v1",
+    authentication: "Supply X-API-Key separately",
+    requests: requestHistory.map(({ form, ...entry }) => entry),
+  };
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(collection, null, 2)], {
+      type: "application/json",
+    }),
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "request-collection.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+const pagination = document.createElement("div");
+pagination.className = "response-pagination";
+pagination.hidden = true;
+pagination.setAttribute("role", "group");
+pagination.setAttribute("aria-label", "Note result pages");
+pagination.innerHTML =
+  '<button type="button" data-page-step="-1">← Previous</button><span role="status" aria-live="polite"></span><button type="button" data-page-step="1">Next →</button>';
+$("#notes").after(pagination);
+function renderPagination() {
+  pagination.hidden = !pageResult;
+  if (!pageResult) return;
+  const { page, page_size, total, next } = pageResult.data,
+    busy = $("#run").disabled;
+  pagination.querySelector("span").textContent =
+    `Page ${page} · ${total} ${total === 1 ? "note" : "notes"} · ${page_size} per page`;
+  pagination.querySelector('[data-page-step="-1"]').disabled =
+    busy || page <= 1;
+  pagination.querySelector('[data-page-step="1"]').disabled = busy || !next;
+}
+pagination.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-page-step]");
+  if (!button || button.disabled || !pageResult) return;
+  const page = pageResult.data.page + Number(button.dataset.pageStep);
+  for (const id of ["page-size", "status-filter", "query"])
+    $("#" + id).value = pageResult.form[id];
+  $("#page").value = page;
+  $("#operation").value = "list";
+  view();
+  $("#run").click();
+});
+
+const importPanel = document.createElement("details");
+importPanel.className = "secondary-options";
+importPanel.innerHTML =
+  '<summary>Import a request collection</summary><p class="hint">Choose an exported Portfolio Lab collection (UTF-8 JSON, up to 1 MB and 10 requests). Import only prepares requests; review before sending. Authentication stays separate.</p><label>Collection file<input id="import-collection" type="file" accept=".json,application/json"></label><p id="import-feedback" role="status"></p><div id="imported-requests"></div>';
 historyPanel.append(importPanel);
-let importedRequests=[],collectionRevision=0;
-$('#import-collection').addEventListener('change',async()=>{
- const file=$('#import-collection').files?.[0];$('#import-collection').value='';if(!file)return;
- const revision=++collectionRevision;$('#import-feedback').textContent=`Reading ${file.name}…`;
- try{
-  const text=await window.localTextFile.read(file,1000000,'1 MB');
-  if(revision!==collectionRevision)return;
-  const entries=window.requestCollection.parse(text);
-  importedRequests=entries;
-  $('#imported-requests').innerHTML=entries.map((entry,index)=>`<div class="note"><div><strong>${esc(entry.method)}</strong><small>${esc(entry.path)}</small></div><button type="button" data-import-request="${index}">Prepare imported request</button></div>`).join('');
-  $('#import-feedback').textContent=`Loaded ${entries.length} ${entries.length===1?'request':'requests'}. Nothing was sent; choose one to prepare.`;
- }catch(error){if(revision===collectionRevision)$('#import-feedback').textContent=`${error.message} Previously imported requests are preserved.`;}
+let importedRequests = [],
+  collectionRevision = 0;
+$("#import-collection").addEventListener("change", async () => {
+  const file = $("#import-collection").files?.[0];
+  $("#import-collection").value = "";
+  if (!file) return;
+  const revision = ++collectionRevision;
+  $("#import-feedback").textContent = `Reading ${file.name}…`;
+  try {
+    const text = await window.localTextFile.read(file, 1000000, "1 MB");
+    if (revision !== collectionRevision) return;
+    const entries = window.requestCollection.parse(text);
+    importedRequests = entries;
+    $("#imported-requests").innerHTML = entries
+      .map(
+        (entry, index) =>
+          `<div class="note"><div><strong>${esc(entry.method)}</strong><small>${esc(entry.path)}</small></div><button type="button" data-import-request="${index}">Prepare imported request</button></div>`,
+      )
+      .join("");
+    $("#import-feedback").textContent =
+      `Loaded ${entries.length} ${entries.length === 1 ? "request" : "requests"}. Nothing was sent; choose one to prepare.`;
+  } catch (error) {
+    if (revision === collectionRevision)
+      $("#import-feedback").textContent =
+        `${error.message} Previously imported requests are preserved.`;
+  }
 });
-$('#imported-requests').addEventListener('click',event=>{
- const button=event.target.closest('[data-import-request]');if(!button||$('#run').disabled)return;
- const entry=importedRequests[Number(button.dataset.importRequest)];if(!entry)return;
- for(const id of historyFields)$('#'+id).value=entry.form[id];
- view();notice('Imported request prepared. Review its body, version, and idempotency key before sending. Nothing was sent.');$('#operation').focus();
+$("#imported-requests").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-import-request]");
+  if (!button || $("#run").disabled) return;
+  const entry = importedRequests[Number(button.dataset.importRequest)];
+  if (!entry) return;
+  for (const id of historyFields) $("#" + id).value = entry.form[id];
+  $("#history-dialog").close();
+  view();
+  notice(
+    "Imported request prepared. Review its body, version, and idempotency key before sending. Nothing was sent.",
+  );
+  $("#operation").focus();
 });
+
+$("#history-open").addEventListener("click", () =>
+  $("#history-dialog").showModal(),
+);
+$("#history-close").addEventListener("click", () =>
+  $("#history-dialog").close(),
+);
